@@ -7,6 +7,10 @@ from fastapi.templating import Jinja2Templates
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
+access_key = os.environ.get("PICOVOICE_ACCESS_KEY")
+if not access_key:
+    raise ValueError("Porcupine access key not set!")
+    
 # ---------------------------
 # Multi wake-word setup
 # ---------------------------
@@ -19,6 +23,7 @@ custom_keyword_paths = [
 ]
 
 porcupine = pvporcupine.create(
+    access_key=access_key,
     keywords=built_in_keywords,
     keyword_paths=custom_keyword_paths
 )
