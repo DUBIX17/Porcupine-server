@@ -1,0 +1,148 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Porcupine Wakeword — Browser</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;max-width:760px;margin:2rem auto;padding:1rem}
+    button{padding:.5rem 1rem;margin:.4rem}
+    .badge{display:inline-block;padding:.3rem .6rem;border-radius:.5rem;background:#eee}
+    #log{white-space:pre-wrap;background:#111;color:#0f0;padding:1rem;border-radius:.5rem;height:220px;overflow:auto}
+  </style>
+</head>
+<body>
+  <h1>Porcupine Wakeword — Browser Recorder</h1>
+  <p>Records microphone, resamples client-side to 16 kHz PCM16LE, and streams Porcupine frames to the server's <code>/audio?sessionId=...</code></p>
+
+  <div>
+    <button id="testBtn">Start Session</button>
+    <button id="startBtn" disabled>Start Recording</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <span class="badge" id="state">idle</span>
+  </div>
+
+  <div style="margin-top:.6rem">Session: <span id="sessionId">-</span> | Spec: <span id="spec">-</span></div>
+
+  <h3>Log</h3>
+  <div id="log">Press "Start Session" to create server session.</div>
+
+<script>
+(async function(){
+  const testBtn = document.getElementById('testBtn');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const stateBadge = document.getElementById('state');
+  const sessionSpan = document.getElementById('sessionId');
+  const specSpan = document.getElementById('spec');
+  const logEl = document.getElementById('log');
+
+  function log(...s){ logEl.textContent = new Date().toISOString() + '  ' + s.join(' ') + '\n' + logEl.textContent }
+
+  let audioCtx=null, mediaStream=null, processor=null, source=null;
+  let session=null;
+
+  async function startSession(){
+    const res = await fetch('/session/start', { method: 'POST' });
+    if (!res.ok) throw new Error('session start failed: ' + res.status);
+    session = await res.json();
+    sessionSpan.textContent = session.sessionId;
+    specSpan.textContent = session.sampleRate + ' / ' + session.frameLength;
+    log('Session started: ' + JSON.stringify(session));
+    startBtn.disabled = false;
+  }
+
+  function downsampleBuffer(buffer, inputSampleRate, outputSampleRate){
+    if (outputSampleRate === inputSampleRate) return buffer;
+    const sampleRateRatio = inputSampleRate / outputSampleRate;
+    const newLength = Math.round(buffer.length / sampleRateRatio);
+    const result = new Float32Array(newLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < result.length){
+      const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+      let accum = 0, count = 0;
+      for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++){ accum += buffer[i]; count++ }
+      result[offsetResult] = count ? (accum / count) : 0;
+      offsetResult++; offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+  }
+
+  function floatTo16BitPCM(float32Array){
+    const l = float32Array.length;
+    const buf = new ArrayBuffer(l * 2);
+    const view = new DataView(buf);
+    for (let i = 0; i < l; i++){
+      let s = Math.max(-1, Math.min(1, float32Array[i]));
+      view.setInt16(i*2, s < 0 ? s*0x8000 : s*0x7FFF, true);
+    }
+    return new Int16Array(buf);
+  }
+
+  testBtn.onclick = async () => {
+    try{
+      await startSession();
+      stateBadge.textContent = 'ready';
+    }catch(e){ log('session start error: '+ e.message) }
+  };
+
+  startBtn.onclick = async () => {
+    if (!session) { log('start a session first'); return; }
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    source = audioCtx.createMediaStreamSource(mediaStream);
+    const bufferSize = 4096;
+    processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+
+    let pcmBuffer = new Int16Array(0);
+    const tgtSR = 16000;
+    const frameLength = session.frameLength;
+    const frameByteLen = frameLength * 2;
+
+    processor.onaudioprocess = (evt) => {
+      const input = evt.inputBuffer.getChannelData(0);
+      const down = downsampleBuffer(input, audioCtx.sampleRate, tgtSR);
+      const int16 = floatTo16BitPCM(down);
+
+      // append
+      const tmp = new Int16Array(pcmBuffer.length + int16.length);
+      tmp.set(pcmBuffer,0);
+      tmp.set(int16, pcmBuffer.length);
+      pcmBuffer = tmp;
+
+      while (pcmBuffer.length * 2 >= frameByteLen){
+        const sendSamples = pcmBuffer.subarray(0, frameLength);
+        // to ArrayBuffer
+        const ab = new ArrayBuffer(sendSamples.length * 2);
+        const dv = new DataView(ab);
+        for (let i=0;i<sendSamples.length;i++) dv.setInt16(i*2, sendSamples[i], true);
+
+        fetch('/audio?sessionId=' + session.sessionId, { method: 'POST', headers: {'Content-Type':'application/octet-stream'}, body: ab })
+          .then(r=>r.json()).then(j=>{ if (j.detected) { stateBadge.textContent = 'wakeword detected'; log('detected: ' + JSON.stringify(j)); } })
+          .catch(e=> log('post error ' + e));
+
+        pcmBuffer = pcmBuffer.subarray(frameLength);
+      }
+    };
+
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+    stateBadge.textContent = 'recording';
+    startBtn.disabled = true; stopBtn.disabled = false;
+    log('recording started');
+  };
+
+  stopBtn.onclick = () => {
+    try{ if (processor) { processor.disconnect(); processor.onaudioprocess=null } } catch(e){}
+    try{ if (source) source.disconnect() }catch(e){}
+    try{ if (audioCtx) audioCtx.close(); audioCtx=null }catch(e){}
+    try{ if (mediaStream) mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null }catch(e){}
+    stateBadge.textContent = 'idle';
+    startBtn.disabled = false; stopBtn.disabled = true;
+    log('stopped');
+  };
+})();
+</script>
+</body>
+</html>
