@@ -1,42 +1,81 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Porcupine Multi-Wakeword Test</title>
+<meta charset="UTF-8">
+<title>Porcupine Wake Word Test</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 2em; }
+  #status { margin-top: 1em; font-weight: bold; color: green; }
+  #startButton { padding: 0.5em 1em; font-size: 1em; }
+</style>
 </head>
 <body>
-<h2>Porcupine Wake Word Test</h2>
-<button onclick="startMic()">Start Mic</button>
-<div id="status"></div>
+<h2>Porcupine Wake Word Browser Test</h2>
+<button id="startButton">Start Mic</button>
+<div id="status">Not started</div>
 
 <script>
 let ws;
-async function startMic() {
-    ws = new WebSocket("ws://" + location.host + "/ws");
+let audioContext;
+let processor;
+let source;
+
+document.getElementById("startButton").addEventListener("click", async () => {
+    const status = document.getElementById("status");
+
+    // Initialize WebSocket
+    ws = new WebSocket("wss://" + window.location.host + "/ws");
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+        status.textContent = "Connected to server. Streaming audio...";
+    };
+
     ws.onmessage = (event) => {
-        if(event.data.startsWith("TRIGGER")){
-            let word = event.data.split(":")[1];
-            document.getElementById("status").innerText = "Wake word detected: " + word;
+        // Messages from server: TRIGGER:<word>
+        const msg = event.data;
+        if (msg.startsWith("TRIGGER:")) {
+            status.textContent = "Wake word detected: " + msg.split(":")[1];
         }
     };
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const audioCtx = new AudioContext({ sampleRate: 16000 });
-    const source = audioCtx.createMediaStreamSource(stream);
-    const processor = audioCtx.createScriptProcessor(512, 1, 1);
-
-    source.connect(processor);
-    processor.connect(audioCtx.destination);
-
-    processor.onaudioprocess = (e) => {
-        const input = e.inputBuffer.getChannelData(0);
-        const int16Buffer = new Int16Array(input.length);
-        for(let i=0;i<input.length;i++){
-            let s = Math.max(-1, Math.min(1, input[i]));
-            int16Buffer[i] = s < 0 ? s*0x8000 : s*0x7FFF;
-        }
-        ws.send(int16Buffer.buffer);
+    ws.onerror = (err) => {
+        console.error("WebSocket error:", err);
+        status.textContent = "WebSocket error";
     };
-}
+
+    ws.onclose = () => {
+        status.textContent = "WebSocket closed";
+    };
+
+    // Request microphone
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        source = audioContext.createMediaStreamSource(stream);
+
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+        processor.onaudioprocess = (e) => {
+            const input = e.inputBuffer.getChannelData(0);
+            // Convert float32 [-1,1] to int16 PCM
+            const buffer = new ArrayBuffer(input.length * 2);
+            const view = new DataView(buffer);
+            for (let i = 0; i < input.length; i++) {
+                let s = Math.max(-1, Math.min(1, input[i]));
+                view.setInt16(i*2, s < 0 ? s*0x8000 : s*0x7FFF, true);
+            }
+            if (ws.readyState === WebSocket.OPEN) ws.send(buffer);
+        };
+
+        status.textContent = "Mic streaming started...";
+    } catch (err) {
+        console.error("Mic access error:", err);
+        status.textContent = "Microphone access denied";
+    }
+});
 </script>
 </body>
 </html>
