@@ -44,7 +44,7 @@ async def get(request: Request):
 # WebSocket streaming endpoint (ESP32 & Browser)
 # ---------------------------
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     try:
         while True:
