@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-"""
-Usage:
-  python test_client.py path/to/16k_mono.wav [SERVER_URL]
-
-Reads a mono 16kHz 16-bit WAV and streams frames to server session.
-"""
-import sys, os, time, wave, requests
+import os
+import sys
+import time
+import wave
+import requests
 
 SERVER = os.getenv('SERVER_URL', 'http://localhost:10000')
 
@@ -16,33 +13,32 @@ def start_session():
 
 def stream_wav(filepath, session):
     wf = wave.open(filepath, 'rb')
-    assert wf.getnchannels() == 1, "WAV must be mono"
-    assert wf.getsampwidth() == 2, "WAV must be 16-bit"
-    assert wf.getframerate() == session['sampleRate'], f"WAV sample rate must be {session['sampleRate']}"
+    assert wf.getnchannels() == 1
+    assert wf.getsampwidth() == 2
+    assert wf.getframerate() == session['sampleRate']
     frame_len = session['frameLength']
     bytes_per_frame = frame_len * 2
     url = SERVER + '/audio?sessionId=' + session['sessionId']
+
     print('Streaming to', url)
     while True:
         data = wf.readframes(frame_len)
-        if not data: break
+        if not data:
+            break
         r = requests.post(url, data=data, headers={'Content-Type':'application/octet-stream'})
         if r.status_code != 200:
             print('server error', r.status_code, r.text); break
         j = r.json()
         if j.get('detected'):
-            print('Wake word detected!', j)
+            print('Wake word detected!')
             break
-        time.sleep(0.005)
+        time.sleep(0.01)
     wf.close()
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: python test_client.py path/to/16k_mono.wav [SERVER_URL]")
+        print('Usage: python test_client.py path/to/16k_mono_pcm.wav')
         sys.exit(1)
-    path = sys.argv[1]
-    if len(sys.argv) > 2:
-        SERVER = sys.argv[2]
     session = start_session()
-    print("Session:", session)
-    stream_wav(path, session)
+    print('Session:', session)
+    stream_wav(sys.argv[1], session)
