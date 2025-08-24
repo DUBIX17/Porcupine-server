@@ -8,28 +8,40 @@ app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
 # ---------------------------
-# Porcupine setup
+# Multi wake-word setup
 # ---------------------------
-porcupine = pvporcupine.create(keywords=["jarvis"],
-                               keyword_paths=["porcupine_params/wake_word.ppn"])  # Replace with your wake word
+# Built-in keywords (optional)
+built_in_keywords = ["jarvis"]
+
+# Custom models
+custom_keyword_paths = [
+    "porcupine_params/word1.ppn"
+]
+
+porcupine = pvporcupine.create(
+    keywords=built_in_keywords,
+    keyword_paths=custom_keyword_paths
+)
+
+# Combined list of all keywords for index mapping
+all_keywords = built_in_keywords + [p.split("/")[-1].split(".")[0] for p in custom_keyword_paths]
 FRAME_LENGTH = porcupine.frame_length
 
 # ---------------------------
-# Browser test page
+# Browser UI
 # ---------------------------
 @app.get("/", response_class=HTMLResponse)
 async def get(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 # ---------------------------
-# WebSocket streaming (ESP32 + Browser)
+# WebSocket streaming endpoint (ESP32 & Browser)
 # ---------------------------
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     try:
         while True:
-            # Receive raw PCM16 audio
             data = await ws.receive_bytes()
             pcm = np.frombuffer(data, dtype=np.int16)
 
@@ -39,8 +51,10 @@ async def websocket_endpoint(ws: WebSocket):
             # Process in frames
             for i in range(0, len(pcm) - FRAME_LENGTH, FRAME_LENGTH):
                 frame = pcm[i:i+FRAME_LENGTH]
-                if porcupine.process(frame) >= 0:
-                    await ws.send_text("TRIGGER")
+                result = porcupine.process(frame)
+                if result >= 0:
+                    detected_word = all_keywords[result]
+                    await ws.send_text(f"TRIGGER:{detected_word}")
     except Exception as e:
         print("WebSocket error:", e)
     finally:
