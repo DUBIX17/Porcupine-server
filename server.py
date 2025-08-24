@@ -10,7 +10,7 @@ templates = Jinja2Templates(directory="templates")
 # ---------------------------
 # Porcupine setup
 # ---------------------------
-porcupine = pvporcupine.create(keywords=["picovoice"])  # Replace with your wake word
+porcupine = pvporcupine.create(keywords=["jarvis"])  # Replace with your wake word
 FRAME_LENGTH = porcupine.frame_length
 
 # ---------------------------
