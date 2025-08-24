@@ -1,7 +1,5 @@
-Flask==2.3.2
-gunicorn==20.1.0
+fastapi
+uvicorn
+numpy
 pvporcupine
-python-dotenv==1.0.0
-requests==2.31.0
-soundfile==0.12.1
-
+jinja2
