@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Porcupine Test</title>
+    <title>Porcupine Multi-Wakeword Test</title>
 </head>
 <body>
 <h2>Porcupine Wake Word Test</h2>
@@ -13,8 +13,9 @@ let ws;
 async function startMic() {
     ws = new WebSocket("ws://" + location.host + "/ws");
     ws.onmessage = (event) => {
-        if(event.data === "TRIGGER"){
-            document.getElementById("status").innerText = "Wake word detected!";
+        if(event.data.startsWith("TRIGGER")){
+            let word = event.data.split(":")[1];
+            document.getElementById("status").innerText = "Wake word detected: " + word;
         }
     };
 
