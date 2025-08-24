@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pvporcupine
 from fastapi import FastAPI, WebSocket, Request
