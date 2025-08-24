@@ -1,50 +1,43 @@
-#!/usr/bin/env python3
-"""
-Porcupine Flask server: accepts raw PCM frames and runs pvporcupine (server-side).
-Endpoints:
-- POST /session/start    -> create session, returns sessionId, sampleRate, frameLength
-- POST /audio?sessionId= -> post raw PCM16LE bytes; returns {"detected": bool, "keyword_index": int?}
-- POST /session/end      -> close session
-- GET  /health           -> basic health
-Serves static files from ./public for browser UI.
-"""
 import os
-import uuid
+import io
 import struct
-from flask import Flask, request, jsonify, send_from_directory, abort
+import time
+import uuid
+from flask import Flask, request, jsonify, send_from_directory
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # pvporcupine (Porcupine Python)
-try:
-    import pvporcupine
-except Exception as e:
-    # Helpful error: pvporcupine may fail to import if native libs/wheels missing.
-    raise RuntimeError("Failed to import pvporcupine. Install pvporcupine and ensure native libs are available. Original error: " + str(e))
+import pvporcupine
 
 app = Flask(__name__, static_folder="public", static_url_path="/")
 
+# Configuration from env
 ACCESS_KEY = os.getenv("PICOVOICE_ACCESS_KEY")
-if not ACCESS_KEY:
-    raise RuntimeError("Set PICOVOICE_ACCESS_KEY environment variable (get one from Picovoice Console)")
-
 KEYWORD_PATHS = os.getenv("KEYWORD_PATHS", "").strip()
 KEYWORDS = os.getenv("KEYWORDS", "").strip()
 SENSITIVITIES = os.getenv("SENSITIVITIES", "").strip()
 
+if not ACCESS_KEY:
+    raise RuntimeError("Set PICOVOICE_ACCESS_KEY environment variable (from Picovoice Console)")
+
 def parse_keyword_inputs():
-    # returns (use_paths: bool, values:list, sensitivities:list)
+    """
+    Return tuple (use_paths: bool, values: list_of_paths_or_names, sensitivities_list)
+    """
     sens = []
     if SENSITIVITIES:
         sens = [max(0.0, min(1.0, float(x.strip()))) for x in SENSITIVITIES.split(",") if x.strip() != ""]
+    # Prefer explicit .ppn paths if provided
     if KEYWORD_PATHS:
         parts = [p.strip() for p in KEYWORD_PATHS.split(",") if p.strip() != ""]
         return True, parts, sens
+    # Otherwise try built-in keywords
     if KEYWORDS:
         parts = [p.strip() for p in KEYWORDS.split(",") if p.strip() != ""]
         return False, parts, sens
-    # default built-in
+    # Default to example built-in keyword
     return False, ["bumblebee"], sens
 
 USE_PATHS, KEY_VALUES, SENS = parse_keyword_inputs()
@@ -54,11 +47,16 @@ USE_PATHS, KEY_VALUES, SENS = parse_keyword_inputs()
 SESSIONS = {}
 
 def create_porcupine_detector():
+    """
+    Create a new pvporcupine instance using the configured keywords.
+    Returns a dict with the instance and metadata.
+    """
+    # sensitivities: if not enough, pvporcupine will require equal length; we expand if needed
     if SENS:
-        sens = list(SENS)
-        while len(sens) < len(KEY_VALUES):
-            sens.append(0.6)
-        sensitivities = sens[:len(KEY_VALUES)]
+        # ensure list length matches keywords
+        while len(SENS) < len(KEY_VALUES):
+            SENS.append(0.6)
+        sensitivities = SENS[: len(KEY_VALUES)]
     else:
         sensitivities = [0.6] * len(KEY_VALUES)
 
@@ -66,7 +64,8 @@ def create_porcupine_detector():
         # KEY_VALUES are file paths to .ppn
         porcupine = pvporcupine.create(access_key=ACCESS_KEY, keyword_paths=KEY_VALUES, sensitivities=sensitivities)
     else:
-        # KEY_VALUES are built-in names like 'bumblebee' (pvporcupine expects lower-case)
+        # KEY_VALUES are built-in keyword names (case-insensitive)
+        # pvporcupine expects keyword_names in lower-case as strings like 'bumblebee'
         names = [k.lower() for k in KEY_VALUES]
         porcupine = pvporcupine.create(access_key=ACCESS_KEY, keyword_names=names, sensitivities=sensitivities)
 
@@ -116,43 +115,52 @@ def audio():
     if not det:
         return jsonify({"error": "invalid sessionId"}), 400
 
+    # Expect raw PCM16LE in request.data
     chunk = request.get_data()
-    if not chunk:
+    if not chunk or len(chunk) == 0:
         return jsonify({"detected": False})
 
+    # prepend remainder from previous call
     buf = det["remainder"] + chunk
+
     frame_byte_len = det["frame_length"] * 2  # 16-bit = 2 bytes
     detected = False
     keyword_index = None
 
+    # process as many full frames as we have
     offset = 0
     while (offset + frame_byte_len) <= len(buf):
         frame_bytes = buf[offset: offset + frame_byte_len]
+        # unpack little-endian signed 16-bit integers
+        # struct format: '<{n}h'
         fmt = "<{}h".format(det["frame_length"])
         frame = struct.unpack(fmt, frame_bytes)
-        try:
-            r = det["porcupine"].process(frame)
-        except Exception as e:
-            # in rare cases process can fail if input malformed
-            return jsonify({"error": "porcupine process error", "detail": str(e)}), 500
+        r = det["porcupine"].process(frame)
         if r >= 0:
             detected = True
             keyword_index = int(r)
+            # stop processing further frames this request (optional: you could continue)
             offset += frame_byte_len
             break
         offset += frame_byte_len
 
+    # Save leftover bytes for next chunk
     det["remainder"] = buf[offset:]
+
     return jsonify({"detected": detected, "keyword_index": keyword_index})
 
-# Serve static UI
+# Serve a minimal static page if you want (optional)
 @app.route("/", methods=["GET"])
 def index():
+    # If you include a public/index.html, Flask will serve it automatically.
     if os.path.exists(os.path.join(app.static_folder, "index.html")):
         return send_from_directory(app.static_folder, "index.html")
-    return "<h3>Porcupine server running.</h3><p>Use POST /session/start then POST raw PCM16LE to /audio?sessionId=...</p>"
+    return (
+        "<h3>Porcupine server running.</h3>"
+        "<p>Use POST /session/start then POST raw PCM16LE to /audio?sessionId=...</p>"
+    )
 
-# teardown
+# Clean-up on shutdown (best-effort)
 @app.teardown_appcontext
 def teardown(exception):
     for det in list(SESSIONS.values()):
