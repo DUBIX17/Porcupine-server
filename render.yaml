@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: porcupine-wakeword-python
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn server:app --bind 0.0.0.0:$PORT --workers 1"
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "10000"
+      # Set these in Render's dashboard (not here):
+      # PICOVOICE_ACCESS_KEY -> your Picovoice Console Access Key
+      # KEYWORD_PATHS -> optional (comma-separated) repo-relative or absolute paths to .ppn files, e.g.: ./models/your_wakeword.ppn
+      # KEYWORDS -> optional (comma-separated built-in keyword names, e.g.: bumblebee)
+      # SENSITIVITIES -> optional (comma-separated floats 0.0-1.0)
+0)
