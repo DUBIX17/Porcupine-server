@@ -1,20 +1,3 @@
-/**
- * server.js
- *
- * - Serves static files from ./public
- * - Opens a WebSocket at /ws-audio that accepts raw 16-bit PCM (ArrayBuffer)
- *   audio chunks (mono, any size). The server resamples/frames as needed.
- *
- * Environment variables:
- *  - PORT (Render sets this automatically)
- *  - PORCUPINE_ACCESS_KEY (required by porcupine-node)
- *  - KEYWORD_PATHS (comma-separated paths to .ppn files on disk relative to project root)
- *
- * Deploy notes:
- *  - Put your .ppn model(s) in the project root (or adjust KEYWORD_PATHS)
- *  - On Render, add PORCUPINE_ACCESS_KEY and KEYWORD_PATHS to service env vars.
- */
-
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
