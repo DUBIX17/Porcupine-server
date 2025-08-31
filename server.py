@@ -1,67 +1,146 @@
-import os
-import numpy as np
-import pvporcupine
-from fastapi import FastAPI, WebSocket, Request
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+/**
+ * server.js
+ *
+ * - Serves static files from ./public
+ * - Opens a WebSocket at /ws-audio that accepts raw 16-bit PCM (ArrayBuffer)
+ *   audio chunks (mono, any size). The server resamples/frames as needed.
+ *
+ * Environment variables:
+ *  - PORT (Render sets this automatically)
+ *  - PORCUPINE_ACCESS_KEY (required by porcupine-node)
+ *  - KEYWORD_PATHS (comma-separated paths to .ppn files on disk relative to project root)
+ *
+ * Deploy notes:
+ *  - Put your .ppn model(s) in the project root (or adjust KEYWORD_PATHS)
+ *  - On Render, add PORCUPINE_ACCESS_KEY and KEYWORD_PATHS to service env vars.
+ */
 
-app = FastAPI()
-templates = Jinja2Templates(directory="templates")
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
+const path = require("path");
 
-access_key = os.environ.get("PICOVOICE_ACCESS_KEY")
-if not access_key:
-    raise ValueError("Porcupine access key not set!")
-    
-# ---------------------------
-# Multi wake-word setup
-# ---------------------------
-# Built-in keywords (optional)
-built_in_keywords = ["jarvis"]
+// Porcupine Node SDK
+const porcupine = require("@picovoice/porcupine-node");
 
-# Custom models
-custom_keyword_paths = [
-    "porcupine_params/word1.ppn"
-]
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: "/ws-audio" });
 
-porcupine = pvporcupine.create(
-    access_key=access_key,
-    keywords=built_in_keywords,
-    keyword_paths=custom_keyword_paths
-)
+const PORT = process.env.PORT || 3000;
+const ACCESS_KEY = process.env.PORCUPINE_ACCESS_KEY || "";
+const KEYWORD_PATHS = (process.env.KEYWORD_PATHS || "porcupine.ppn").split(",").map(s => s.trim());
 
-# Combined list of all keywords for index mapping
-all_keywords = built_in_keywords + [p.split("/")[-1].split(".")[0] for p in custom_keyword_paths]
-FRAME_LENGTH = porcupine.frame_length
+if (!ACCESS_KEY) {
+  console.error("ERROR: PORCUPINE_ACCESS_KEY environment variable is required.");
+  process.exit(1);
+}
 
-# ---------------------------
-# Browser UI
-# ---------------------------
-@app.get("/", response_class=HTMLResponse)
-async def get(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+// Serve static client files
+app.use(express.static(path.join(__dirname, "public")));
 
-# ---------------------------
-# WebSocket streaming endpoint (ESP32 & Browser)
-# ---------------------------
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
-    try:
-        while True:
-            data = await ws.receive_bytes()
-            pcm = np.frombuffer(data, dtype=np.int16)
+// Porcupine parameters
+const SAMPLE_RATE = porcupine.SAMPLE_RATE || 16000; // usually 16000
+const FRAME_LENGTH = porcupine.FRAME_LENGTH || 512; // usually 512
 
-            if len(pcm) < FRAME_LENGTH:
-                continue
+console.log(`Porcupine sampleRate=${SAMPLE_RATE} frameLength=${FRAME_LENGTH}`);
+console.log("Keyword paths:", KEYWORD_PATHS);
 
-            # Process in frames
-            for i in range(0, len(pcm) - FRAME_LENGTH, FRAME_LENGTH):
-                frame = pcm[i:i+FRAME_LENGTH]
-                result = porcupine.process(frame)
-                if result >= 0:
-                    detected_word = all_keywords[result]
-                    await ws.send_text(f"TRIGGER:{detected_word}")
-    except Exception as e:
-        print("WebSocket error:", e)
-    finally:
-        await ws.close()
+// Create Porcupine instance (one global instance shared by all clients is simplest)
+// If you need per-client models or instances, create per-WS-client instances instead.
+let porcupineHandle;
+try {
+  porcupineHandle = new porcupine.Porcupine(ACCESS_KEY, KEYWORD_PATHS);
+  console.log("Porcupine initialized.");
+} catch (err) {
+  console.error("Failed to initialize Porcupine:", err);
+  process.exit(1);
+}
+
+// Helper: convert ArrayBuffer (16-bit PCM little-endian) to Int16Array
+function abToInt16(ab) {
+  return new Int16Array(ab);
+}
+
+// For incoming audio we will collect samples into a buffer of Int16,
+// then each time we have FRAME_LENGTH samples we call porcupineHandle.process(frame)
+wss.on("connection", (ws, req) => {
+  console.log("Client connected:", req.socket.remoteAddress);
+
+  // per-connection buffer for samples
+  let sampleBuffer = new Int16Array(0);
+
+  ws.on("message", (msg) => {
+    // Expect binary messages (ArrayBuffer) containing 16-bit PCM little-endian samples (Int16)
+    if (typeof msg === "string") {
+      // protocol messages
+      try {
+        const obj = JSON.parse(msg);
+        if (obj && obj.type === "info") {
+          console.log("Client info:", obj);
+        }
+      } catch (e) {
+        console.log("Received text message:", msg);
+      }
+      return;
+    }
+
+    // msg is Buffer (Node.js Buffer). We need to view as Int16Array.
+    // Ensure even length
+    const buf = Buffer.from(msg);
+    if (buf.length % 2 !== 0) {
+      // drop last byte if odd (shouldn't usually happen)
+      console.warn("Received audio buffer with odd length, dropping last byte.");
+      buf = buf.slice(0, buf.length - 1);
+    }
+
+    // Create Int16Array view (little-endian)
+    const incomingSamples = new Int16Array(buf.buffer, buf.byteOffset, buf.length / 2);
+
+    // Append to sampleBuffer
+    const combined = new Int16Array(sampleBuffer.length + incomingSamples.length);
+    combined.set(sampleBuffer, 0);
+    combined.set(incomingSamples, sampleBuffer.length);
+    sampleBuffer = combined;
+
+    // Process in FRAME_LENGTH chunks
+    while (sampleBuffer.length >= FRAME_LENGTH) {
+      const frame = sampleBuffer.slice(0, FRAME_LENGTH); // new Int16Array
+      // Call porcupine process
+      try {
+        const keywordIndex = porcupineHandle.process(frame);
+        if (keywordIndex >= 0) {
+          const resp = JSON.stringify({ event: "wake", keywordIndex });
+          ws.send(resp);
+          console.log("Wake detected -> sent to client");
+        }
+      } catch (err) {
+        console.error("Error while running porcupine.process:", err);
+        // Optionally notify client of error
+        ws.send(JSON.stringify({ event: "error", message: err.toString() }));
+      }
+
+      // Remove processed samples from buffer
+      if (sampleBuffer.length === FRAME_LENGTH) {
+        sampleBuffer = new Int16Array(0);
+      } else {
+        sampleBuffer = sampleBuffer.slice(FRAME_LENGTH);
+      }
+    }
+  });
+
+  ws.on("close", () => {
+    console.log("Client disconnected.");
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("Shutting down...");
+  if (porcupineHandle) porcupineHandle.delete();
+  process.exit(0);
+});
+
+server.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+  console.log(`Open http://localhost:${PORT} (or your Render URL) to test the client.`);
+});
