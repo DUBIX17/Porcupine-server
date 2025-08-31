@@ -13,7 +13,7 @@ const wss = new WebSocket.Server({ server, path: "/ws-audio" });
 const PORT = process.env.PORT || 3000;
 const ACCESS_KEY = process.env.PORCUPINE_ACCESS_KEY || "";
 const KEYWORD_PATHS = (process.env.KEYWORD_PATHS || "porcupine.ppn").split(",").map(s => s.trim());
-const sensitivities = new Array(keywordPaths.length).fill(0.7);
+const sensitivities = [0.7, 0.7];  // ✅ two values, one for each keyword
 
 if (!ACCESS_KEY) {
   console.error("ERROR: PORCUPINE_ACCESS_KEY environment variable is required.");
