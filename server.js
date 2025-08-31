@@ -13,6 +13,7 @@ const wss = new WebSocket.Server({ server, path: "/ws-audio" });
 const PORT = process.env.PORT || 3000;
 const ACCESS_KEY = process.env.PORCUPINE_ACCESS_KEY || "";
 const KEYWORD_PATHS = (process.env.KEYWORD_PATHS || "porcupine.ppn").split(",").map(s => s.trim());
+const sensitivities = new Array(keywordPaths.length).fill(0.7);
 
 if (!ACCESS_KEY) {
   console.error("ERROR: PORCUPINE_ACCESS_KEY environment variable is required.");
@@ -33,7 +34,7 @@ console.log("Keyword paths:", KEYWORD_PATHS);
 // If you need per-client models or instances, create per-WS-client instances instead.
 let porcupineHandle;
 try {
-  porcupineHandle = new porcupine.Porcupine(ACCESS_KEY, KEYWORD_PATHS);
+  porcupineHandle = new porcupine.Porcupine(ACCESS_KEY, KEYWORD_PATHS, sensitivities);
   console.log("Porcupine initialized.");
 } catch (err) {
   console.error("Failed to initialize Porcupine:", err);
