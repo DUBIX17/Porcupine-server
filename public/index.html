@@ -11,7 +11,7 @@
   </style>
 </head>
 <body>
-  <h1>Porcupine WebSocket test</h1>
+  <h1>Porcupine WebSocket test (AudioWorklet)</h1>
   <p>Click <strong>Start</strong> to stream your microphone to the server via WebSocket. The server runs Porcupine and will reply with <code>{"event":"wake"}</code> when it detects the wake word.</p>
   <div>
     <button id="start">Start</button>
@@ -35,8 +35,8 @@
 
   let ws;
   let audioCtx;
-  let processor;
   let source;
+  let workletNode;
   let socketUrl = `${location.origin.replace(/^http/, 'ws')}/ws-audio`;
 
   startBtn.addEventListener("click", start);
@@ -48,13 +48,29 @@
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      // We'll use a ScriptProcessor to capture raw audio. Buffer size 4096 is fine.
-      const bufferSize = 4096;
-      processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+
+      // Load our AudioWorkletProcessor (defined below as a blob)
+      const workletCode = `
+        class PCMProcessor extends AudioWorkletProcessor {
+          process(inputs, outputs, parameters) {
+            const input = inputs[0];
+            if (input.length > 0) {
+              const channelData = input[0];
+              this.port.postMessage(channelData);
+            }
+            return true;
+          }
+        }
+        registerProcessor('pcm-processor', PCMProcessor);
+      `;
+      const blob = new Blob([workletCode], { type: "application/javascript" });
+      const url = URL.createObjectURL(blob);
+      await audioCtx.audioWorklet.addModule(url);
 
       source = audioCtx.createMediaStreamSource(stream);
-      source.connect(processor);
-      processor.connect(audioCtx.destination); // needed in some browsers
+      workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
+
+      source.connect(workletNode).connect(audioCtx.destination);
 
       ws = new WebSocket(socketUrl);
       ws.binaryType = "arraybuffer";
@@ -63,7 +79,6 @@
         statusEl.textContent = "WebSocket open. Streaming audio...";
         stopBtn.disabled = false;
         log("WS open:", socketUrl);
-        // optional: tell server some client info
         ws.send(JSON.stringify({ type: "info", sampleRate: audioCtx.sampleRate }));
       };
 
@@ -72,7 +87,6 @@
           const obj = JSON.parse(evt.data);
           if (obj.event === "wake") {
             log("WAKE DETECTED!", JSON.stringify(obj));
-            // Visual feedback
             document.body.style.background = "#ffeeee";
             setTimeout(()=> document.body.style.background = "", 300);
           } else if (obj.event === "error") {
@@ -94,16 +108,14 @@
         log("WS error", e);
       };
 
-      // ScriptProcessor callback
-      processor.onaudioprocess = (e) => {
-        // inputBuffer is a Float32Array at audioCtx.sampleRate
-        const floatData = e.inputBuffer.getChannelData(0);
-        // convert to 16kHz PCM Int16
+      // Receive PCM from AudioWorklet
+      workletNode.port.onmessage = (e) => {
+        const floatData = e.data; // Float32Array
         const downsampled = downsampleBuffer(floatData, audioCtx.sampleRate, 16000);
         if (!downsampled) return;
         const int16 = floatTo16BitPCM(downsampled);
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(int16.buffer); // send ArrayBuffer of Int16 samples (little-endian)
+          ws.send(int16.buffer);
         }
       };
     } catch (err) {
@@ -117,10 +129,9 @@
     stopBtn.disabled = true;
     startBtn.disabled = false;
     statusEl.textContent = "Stopped.";
-    if (processor) {
-      processor.disconnect();
-      processor.onaudioprocess = null;
-      processor = null;
+    if (workletNode) {
+      workletNode.disconnect();
+      workletNode = null;
     }
     if (source) {
       source.disconnect();
@@ -135,7 +146,7 @@
     }
   }
 
-  // Convert Float32 samples (range -1..1) to Int16Array ArrayBuffer (16-bit PCM LE)
+  // Convert Float32 samples to Int16Array (PCM LE)
   function floatTo16BitPCM(float32Array) {
     const len = float32Array.length;
     const buffer = new ArrayBuffer(len * 2);
@@ -144,12 +155,12 @@
     for (let i = 0; i < len; i++, offset += 2) {
       let s = Math.max(-1, Math.min(1, float32Array[i]));
       s = s < 0 ? s * 0x8000 : s * 0x7fff;
-      view.setInt16(offset, s, true); // little-endian
+      view.setInt16(offset, s, true);
     }
     return new Int16Array(buffer);
   }
 
-  // Downsamples from fromRate to toRate using simple linear interpolation.
+  // Downsample to target rate
   function downsampleBuffer(buffer, fromRate, toRate) {
     if (toRate === fromRate) {
       return buffer;
@@ -165,7 +176,6 @@
     let offsetBuffer = 0;
     while (offsetResult < result.length) {
       const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-      // Use average value between offsets for better anti-aliasing than picking one sample
       let accum = 0, count = 0;
       for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
         accum += buffer[i];
